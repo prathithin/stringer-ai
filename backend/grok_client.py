@@ -129,6 +129,9 @@ TOOLS = [
 ]
 
 
+FUNCTION_TOOLS = [t for t in TOOLS if t["type"] == "function"]
+
+
 def xai_key() -> str:
     key = (os.getenv("XAI_API_KEY") or "").strip()
     if not key or key == "xai-your-key-here":
@@ -223,7 +226,7 @@ def plan_from_question(question: str) -> dict:
     )
 
     used_recent = False
-    for _ in range(8):
+    for _ in range(3):
         fn_calls = [
             item
             for item in (response.output or [])
@@ -249,7 +252,7 @@ def plan_from_question(question: str) -> dict:
                         ),
                     }
                 ],
-                tools=tools,
+                tools=FUNCTION_TOOLS,
                 tool_choice="required",
             )
             continue
@@ -271,7 +274,7 @@ def plan_from_question(question: str) -> dict:
             reasoning={"effort": "none"},
             previous_response_id=response.id,
             input=outputs,
-            tools=tools,
+            tools=FUNCTION_TOOLS,
         )
 
     # Structured final pass so SwiftUI always gets the same keys.

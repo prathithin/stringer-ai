@@ -61,7 +61,7 @@ def _uncertainty_minutes() -> int:
         return DEFAULT_UNCERTAINTY_MINUTES
 
 
-def _get(endpoint: str, timeout: float = 12.0) -> Any:
+def _get(endpoint: str, timeout: float = 4.0) -> Any:
     url = f"{BASE_URL}/{endpoint}"
     with httpx.Client(timeout=timeout, headers={"User-Agent": "StingerAssistant/1.0"}) as client:
         resp = client.get(url, params={"apiKey": _api_key(), "isPublicMap": "true"})
@@ -126,7 +126,21 @@ def _latest_snapshot_slice() -> tuple[str, list[dict]]:
     return latest, [r for r in rows if r.get("snapshot_time") == latest]
 
 
+_FEED_CACHE: dict | None = None
+_FEED_CACHE_AT: datetime | None = None
+
+
 def live_feed() -> dict:
+    global _FEED_CACHE, _FEED_CACHE_AT
+    now = datetime.now(timezone.utc)
+    if _FEED_CACHE is not None and _FEED_CACHE_AT and (now - _FEED_CACHE_AT) < timedelta(seconds=30):
+        return _FEED_CACHE
+    _FEED_CACHE = _live_feed_uncached()
+    _FEED_CACHE_AT = now
+    return _FEED_CACHE
+
+
+def _live_feed_uncached() -> dict:
     """Return arrivals keyed by RouteStopID plus a using_recent_data flag."""
     using_recent = False
     vehicles: list[dict] = []
