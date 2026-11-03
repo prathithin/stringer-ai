@@ -22,7 +22,7 @@ actor APIClient {
         var req = URLRequest(url: Self.baseURL.appendingPathComponent("move"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 90
+        req.timeoutInterval = 120
         var body: [String: Any] = ["question": question]
         if let previous {
             let data = try JSONEncoder().encode(previous)

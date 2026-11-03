@@ -46,7 +46,7 @@ PLAN_SCHEMA = {
         },
         "disruption_summary": {
             "type": "string",
-            "description": "One line from live X search, or 'No live disruptions found'",
+            "description": "One line on disruptions, or 'No live disruptions found'",
         },
         "reasoning": {
             "type": "string",
@@ -143,7 +143,7 @@ def _client() -> OpenAI:
     key = xai_key()
     if not key:
         raise RuntimeError("XAI_API_KEY is not set in backend/.env")
-    return OpenAI(api_key=key, base_url="https://api.x.ai/v1")
+    return OpenAI(api_key=key, base_url="https://api.x.ai/v1", timeout=40.0)
 
 
 def _get_building_info(building: str, origin: str | None = None) -> dict:
@@ -178,7 +178,7 @@ def _system_prompt(now: datetime) -> str:
 Current local time: {now.strftime("%A %Y-%m-%d %I:%M %p %Z")}.
 
 Always call get_building_info, get_arrivals (origin stop AND destination stop), and get_uncertainty before answering.
-Always use x_search for current Stinger / GT bus / campus transit disruptions (detours, game day, late buses). Keep disruption_summary to one sentence.
+Call every needed tool in parallel on the first turn. Keep disruption_summary to one sentence; use "No live disruptions found" unless a tool result says otherwise.
 
 Assume origin is West Village if the student does not say where they are.
 
@@ -210,95 +210,64 @@ def _extract_output_text(response) -> str:
     return "".join(chunks)
 
 
+_PLAN_TEXT_FORMAT = {
+    "format": {
+        "type": "json_schema",
+        "name": "stinger_plan",
+        "strict": True,
+        "schema": PLAN_SCHEMA,
+    }
+}
+
+
 def plan_from_question(question: str) -> dict:
     client = _client()
     now = datetime.now(EASTERN)
-    tools = list(TOOLS)
-    tools[0] = {"type": "x_search", "from_date": now.date().isoformat()}
 
+    # Two Grok round-trips max. Live X search is the timeout source — skipped.
     response = client.responses.create(
         model=CHAT_MODEL,
         reasoning={"effort": "none"},
         instructions=_system_prompt(now),
         input=[{"role": "user", "content": question}],
-        tools=tools,
+        tools=FUNCTION_TOOLS,
         tool_choice="required",
+        parallel_tool_calls=True,
     )
 
     used_recent = False
-    for _ in range(3):
-        fn_calls = [
-            item
-            for item in (response.output or [])
-            if getattr(item, "type", None) == "function_call"
-        ]
-        if not fn_calls:
-            has_message = any(
-                getattr(item, "type", None) == "message"
-                for item in (response.output or [])
-            )
-            if has_message:
-                break
-            response = client.responses.create(
-                model=CHAT_MODEL,
-                reasoning={"effort": "none"},
-                previous_response_id=response.id,
-                input=[
-                    {
-                        "role": "user",
-                        "content": (
-                            "Now call get_building_info, get_arrivals for the origin "
-                            "stop and destination stop, and get_uncertainty."
-                        ),
-                    }
-                ],
-                tools=FUNCTION_TOOLS,
-                tool_choice="required",
-            )
-            continue
-        outputs = []
-        for item in fn_calls:
-            args = json.loads(item.arguments or "{}")
-            result = _run_tool(item.name, args)
-            if result.get("using_recent_data"):
-                used_recent = True
-            outputs.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": item.call_id,
-                    "output": json.dumps(result),
-                }
-            )
-        response = client.responses.create(
-            model=CHAT_MODEL,
-            reasoning={"effort": "none"},
-            previous_response_id=response.id,
-            input=outputs,
-            tools=FUNCTION_TOOLS,
+    fn_calls = [
+        item
+        for item in (response.output or [])
+        if getattr(item, "type", None) == "function_call"
+    ]
+    outputs = []
+    for item in fn_calls:
+        args = json.loads(item.arguments or "{}")
+        result = _run_tool(item.name, args)
+        if result.get("using_recent_data"):
+            used_recent = True
+        outputs.append(
+            {
+                "type": "function_call_output",
+                "call_id": item.call_id,
+                "output": json.dumps(result),
+            }
         )
+    if not outputs:
+        outputs = [
+            {
+                "role": "user",
+                "content": "Return the plan JSON now from campus knowledge and any tool results.",
+            }
+        ]
 
-    # Structured final pass so SwiftUI always gets the same keys.
     response = client.responses.create(
         model=CHAT_MODEL,
         reasoning={"effort": "none"},
         previous_response_id=response.id,
-        input=[
-            {
-                "role": "user",
-                "content": (
-                    "Return the final plan as JSON only, matching the schema. "
-                    f"using_recent_data must be {str(used_recent).lower()} if tools reported snapshot data."
-                ),
-            }
-        ],
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "stinger_plan",
-                "strict": True,
-                "schema": PLAN_SCHEMA,
-            }
-        },
+        input=outputs,
+        text=_PLAN_TEXT_FORMAT,
     )
     raw = _extract_output_text(response).strip()
     if raw.startswith("```"):
